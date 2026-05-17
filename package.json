@@ -1,0 +1,33 @@
+{
+  "name": "@feathq/feat-js-sdk",
+  "version": "0.1.0",
+  "description": "feat feature-flag SDK for JavaScript and TypeScript (server-side, OpenFeature provider)",
+  "type": "module",
+  "packageManager": "yarn@4.14.1",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest --run"
+  },
+  "dependencies": {
+    "@feathq/datafile-schema": "portal:../../feat-data-plane/packages/datafile-schema",
+    "@feathq/feat-eval": "portal:../../feat-data-plane/packages/feat-eval"
+  },
+  "peerDependencies": {
+    "@openfeature/server-sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@openfeature/core": "^1.10.0",
+    "@openfeature/server-sdk": "^1.18.0",
+    "@types/node": "^25.6.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  }
+}
