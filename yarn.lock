@@ -215,17 +215,17 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@feathq/datafile-schema@portal:../../packages/datafile-schema::locator=%40feathq%2Fjs-sdk%40workspace%3A.":
+"@feathq/datafile-schema@portal:../../feat-packages/datafile-schema::locator=%40feathq%2Fjs-sdk%40workspace%3A.":
   version: 0.0.0-use.local
-  resolution: "@feathq/datafile-schema@portal:../../packages/datafile-schema::locator=%40feathq%2Fjs-sdk%40workspace%3A."
+  resolution: "@feathq/datafile-schema@portal:../../feat-packages/datafile-schema::locator=%40feathq%2Fjs-sdk%40workspace%3A."
   languageName: node
   linkType: soft
 
-"@feathq/feat-eval@portal:../../packages/feat-eval::locator=%40feathq%2Fjs-sdk%40workspace%3A.":
+"@feathq/feat-eval@portal:../../feat-packages/feat-eval::locator=%40feathq%2Fjs-sdk%40workspace%3A.":
   version: 0.0.0-use.local
-  resolution: "@feathq/feat-eval@portal:../../packages/feat-eval::locator=%40feathq%2Fjs-sdk%40workspace%3A."
+  resolution: "@feathq/feat-eval@portal:../../feat-packages/feat-eval::locator=%40feathq%2Fjs-sdk%40workspace%3A."
   dependencies:
-    "@feathq/datafile-schema": "workspace:*"
+    "@feathq/datafile-schema": "workspace:^"
   languageName: node
   linkType: soft
 
@@ -233,8 +233,8 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@feathq/js-sdk@workspace:."
   dependencies:
-    "@feathq/datafile-schema": "portal:../../packages/datafile-schema"
-    "@feathq/feat-eval": "portal:../../packages/feat-eval"
+    "@feathq/datafile-schema": "npm:^0.1.0"
+    "@feathq/feat-eval": "npm:^0.1.0"
     "@openfeature/core": "npm:^1.10.0"
     "@openfeature/server-sdk": "npm:^1.18.0"
     "@types/node": "npm:^25.6.2"
