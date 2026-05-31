@@ -1,18 +1,45 @@
 {
-  "name": "@feathq/feat-js-sdk",
+  "name": "@feathq/js-sdk",
   "version": "0.1.0",
   "description": "feat feature-flag SDK for JavaScript and TypeScript (server-side, OpenFeature provider)",
+  "keywords": [
+    "feature-flags",
+    "feature-toggles",
+    "openfeature",
+    "feat",
+    "feature-management"
+  ],
+  "license": "MIT",
+  "author": "feat HQ <engineering@feat.so>",
+  "homepage": "https://feat.so",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/feathq/js-sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/feathq/js-sdk/issues"
+  },
   "type": "module",
   "packageManager": "yarn@4.14.1",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
     }
   },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
+    "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest --run"
   },
@@ -27,7 +54,11 @@
     "@openfeature/core": "^1.10.0",
     "@openfeature/server-sdk": "^1.18.0",
     "@types/node": "^25.6.2",
+    "tsup": "^8.3.5",
     "typescript": "^6.0.3",
     "vitest": "^4.1.6"
+  },
+  "resolutions": {
+    "@feathq/datafile-schema@workspace:*": "portal:../../feat-data-plane/packages/datafile-schema"
   }
 }
