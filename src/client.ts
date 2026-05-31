@@ -2,22 +2,24 @@ import type { Datafile } from "@feathq/datafile-schema";
 import { evaluate } from "@feathq/feat-eval";
 import type { EvalContext, EvaluationResult } from "./types";
 
+const MIN_POLL_INTERVAL_MS = 5_000;
+const DEFAULT_POLL_INTERVAL_MS = 30_000;
+const MAX_DATAFILE_BYTES = 10 * 1024 * 1024;
+
 export interface FeatClientConfig {
   apiKey: string;
   dataPlaneUrl: string;
-  // Background-poll interval in ms. Defaults to 30s, matching Cloudflare
-  // KV's typical global-replication ceiling.
+  // Background-poll interval in ms. Defaults to 30s. Floored at 5s to
+  // protect both the SDK consumer and the feat endpoint from accidental
+  // hot loops.
   pollIntervalMs?: number;
-  // Network fetch override (Workers, Node, custom proxy). Defaults to
-  // globalThis.fetch.
+  // Network fetch override. Defaults to globalThis.fetch.
   fetch?: typeof fetch;
 }
 
 // Network client that holds the in-memory datafile and refreshes it on a
-// background interval. The eval engine is synchronous w.r.t. the datafile
-// (the only async work is bucketing's SHA-1 hash). Network failures keep
-// the last-known-good datafile in place — the SDK only goes "cold" on the
-// very first fetch.
+// background interval. Network failures keep the last-known-good datafile
+// in place; the SDK only goes "cold" on the very first fetch failure.
 export class FeatClient {
   private datafile: Datafile | null = null;
   private etag: string | null = null;
@@ -27,12 +29,14 @@ export class FeatClient {
   private readonly pollIntervalMs: number;
 
   constructor(private readonly config: FeatClientConfig) {
+    assertHttpsUrl(config.dataPlaneUrl);
     this.fetchImpl = config.fetch ?? globalThis.fetch.bind(globalThis);
-    this.pollIntervalMs = config.pollIntervalMs ?? 30_000;
+    this.pollIntervalMs = Math.max(
+      config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+      MIN_POLL_INTERVAL_MS,
+    );
   }
 
-  // Resolves once the first datafile is in memory (or rejects if the
-  // first fetch fails). Subsequent polls run in the background.
   async ready(): Promise<void> {
     if (!this.readyPromise) {
       this.readyPromise = this.bootstrap();
@@ -72,13 +76,16 @@ export class FeatClient {
   private async bootstrap(): Promise<void> {
     await this.fetchDatafile();
     this.timer = setInterval(() => {
-      void this.fetchDatafile().catch((err) => {
-        console.warn("feat-js-sdk: background poll failed", err);
+      void this.fetchDatafile().catch((err: unknown) => {
+        console.warn(
+          "feat: background poll failed:",
+          err instanceof Error ? err.message : String(err),
+        );
       });
     }, this.pollIntervalMs);
     // setInterval keeps Node processes alive; unref so consumers don't
-    // need to call close() just to exit. Workers/Browsers no-op on
-    // missing unref.
+    // need to call close() just to exit. Other runtimes no-op on missing
+    // unref.
     const t = this.timer as unknown as { unref?: () => void };
     t.unref?.();
   }
@@ -91,16 +98,33 @@ export class FeatClient {
     if (this.etag) headers["If-None-Match"] = this.etag;
     const res = await this.fetchImpl(url, { method: "GET", headers });
     if (res.status === 304) return false;
-    if (res.status === 404) {
-      // No datafile yet; treat as transient and let the next poll catch it.
-      return false;
-    }
+    if (res.status === 404) return false;
     if (!res.ok) {
-      throw new Error(`fetchDatafile failed: ${res.status} ${res.statusText}`);
+      throw new Error(`fetchDatafile failed: ${res.status}`);
+    }
+    const lengthHeader = res.headers.get("content-length");
+    if (lengthHeader && Number(lengthHeader) > MAX_DATAFILE_BYTES) {
+      throw new Error("datafile exceeds maximum allowed size");
     }
     const next = (await res.json()) as Datafile;
     this.datafile = next;
     this.etag = res.headers.get("etag");
     return true;
   }
+}
+
+// Allow https:// and loopback over http for local dev / tests. Anything
+// else gets rejected so a misconfigured consumer can't accidentally send
+// the bearer token over plaintext.
+function assertHttpsUrl(url: string): void {
+  try {
+    const u = new URL(url);
+    if (u.protocol === "https:") return;
+    if (u.protocol === "http:" && (u.hostname === "localhost" || u.hostname === "127.0.0.1")) {
+      return;
+    }
+  } catch {
+    // fall through
+  }
+  throw new Error("dataPlaneUrl must use https:// (http://localhost allowed for tests)");
 }

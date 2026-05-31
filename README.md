@@ -2,7 +2,7 @@
 
 Server-side JavaScript / TypeScript SDK for [feat](https://feat.so) feature flags. Local flag evaluation against a polled datafile, OpenFeature provider included.
 
-For browser code, use [`@feathq/web-sdk`](../web-sdk). For Cloudflare Workers via service binding, use [`@feathq/worker-sdk`](../worker-sdk).
+For browser code, use [`@feathq/web-sdk`](../web-sdk). For edge runtimes via service binding, use [`@feathq/worker-sdk`](../worker-sdk).
 
 ## Install
 
@@ -55,9 +55,10 @@ const enabled = await client.getBooleanValue("checkout-v2", false, {
 
 ## How it works
 
-- The SDK fetches a per-environment **datafile** from feat's data plane and keeps it in memory.
-- Polls every 30 s by default (configurable). ETag-aware: unchanged polls are 304s.
-- Evaluation is local; no per-flag network call. Marketing claims p99 < 2 ms in-runtime.
+- The SDK fetches a per-environment **datafile** and keeps it in memory.
+- Polls every 30 s by default (configurable down to 5 s). ETag-aware: unchanged polls are 304s.
+- Evaluation is local; no per-flag network call.
+- `dataPlaneUrl` must use `https://` (the constructor rejects plaintext URLs except `http://localhost` for tests).
 
 ## License
 

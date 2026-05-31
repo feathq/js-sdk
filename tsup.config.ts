@@ -7,7 +7,9 @@ export default defineConfig({
   entry: ["src/index.ts"],
   format: ["esm", "cjs"],
   dts: true,
-  sourcemap: true,
+  // Sourcemaps deliberately disabled for published builds; we don't want
+  // original comments or internal package paths visible to consumers.
+  sourcemap: false,
   clean: true,
   target: "es2022",
   treeshake: true,
