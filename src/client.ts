@@ -1,10 +1,12 @@
 import type { Datafile } from "@feathq/datafile-schema";
 import { evaluate } from "@feathq/feat-eval";
 import type { EvalContext, EvaluationResult } from "./types";
+import { SDK_VERSION } from "./version";
 
 const MIN_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_POLL_INTERVAL_MS = 30_000;
 const MAX_DATAFILE_BYTES = 10 * 1024 * 1024;
+const USER_AGENT = `feat-sdk-js/${SDK_VERSION}`;
 
 export interface FeatClientConfig {
   apiKey: string;
@@ -94,6 +96,7 @@ export class FeatClient {
     const url = `${this.config.dataPlaneUrl.replace(/\/$/, "")}/sdk/v1/datafile`;
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.config.apiKey}`,
+      "User-Agent": USER_AGENT,
     };
     if (this.etag) headers["If-None-Match"] = this.etag;
     const res = await this.fetchImpl(url, { method: "GET", headers });
