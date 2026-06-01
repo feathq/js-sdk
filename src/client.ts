@@ -6,9 +6,6 @@ import { SDK_VERSION } from "./version";
 const MIN_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_POLL_INTERVAL_MS = 30_000;
 const MAX_DATAFILE_BYTES = 10 * 1024 * 1024;
-// Identifies SDK traffic in data-plane logs and edge analytics. Bundlers
-// can also see this string when tree-shaking, which is useful for
-// version pinning audits.
 const USER_AGENT = `feat-sdk-js/${SDK_VERSION}`;
 
 export interface FeatClientConfig {
