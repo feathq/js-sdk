@@ -215,19 +215,21 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@feathq/datafile-schema@portal:../../feat-packages/datafile-schema::locator=%40feathq%2Fjs-sdk%40workspace%3A.":
-  version: 0.0.0-use.local
-  resolution: "@feathq/datafile-schema@portal:../../feat-packages/datafile-schema::locator=%40feathq%2Fjs-sdk%40workspace%3A."
+"@feathq/datafile-schema@npm:^0.1.0":
+  version: 0.1.0
+  resolution: "@feathq/datafile-schema@npm:0.1.0"
+  checksum: 10c0/ec8b834f71ffbe1c2b01abb5dfc4f23b9ddf31fc9e262470836877356f877337712c41719c628a3b5bb119e772f5c3c23449b2c5bf93466ba435324e523c0a09
   languageName: node
-  linkType: soft
+  linkType: hard
 
-"@feathq/feat-eval@portal:../../feat-packages/feat-eval::locator=%40feathq%2Fjs-sdk%40workspace%3A.":
-  version: 0.0.0-use.local
-  resolution: "@feathq/feat-eval@portal:../../feat-packages/feat-eval::locator=%40feathq%2Fjs-sdk%40workspace%3A."
+"@feathq/feat-eval@npm:^0.1.0":
+  version: 0.1.0
+  resolution: "@feathq/feat-eval@npm:0.1.0"
   dependencies:
-    "@feathq/datafile-schema": "workspace:^"
+    "@feathq/datafile-schema": "npm:^0.1.0"
+  checksum: 10c0/3bc445a72f977d7538c59afa774aed714b26fb275c7bf55350ee88f8a738f58850c8dde5a7bfb9a6c0a524fb691b7b74d31c273b251a2b591e3b89c0fe4f6216
   languageName: node
-  linkType: soft
+  linkType: hard
 
 "@feathq/js-sdk@workspace:.":
   version: 0.0.0-use.local
