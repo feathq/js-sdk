@@ -1,12 +1,12 @@
 <p align="center">
   <a href="https://feat.so">
-    <img src="https://feat.so/logo/wordmark.png" alt="feat.so" width="200" />
+    <img src="https://feat.so/logo/wordmark.png" alt="feat.so" width="320" />
   </a>
 </p>
 
 ---
 
-# @feathq/js-sdk
+# feat Node.js SDK
 
 Server-side JavaScript / TypeScript SDK for [feat](https://feat.so) feature flags. Local flag evaluation against a polled datafile, OpenFeature provider included.
 
