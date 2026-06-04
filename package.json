@@ -1,6 +1,6 @@
 {
   "name": "@feathq/js-sdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "feat feature-flag SDK for JavaScript and TypeScript (server-side, OpenFeature provider)",
   "keywords": [
     "feature-flags",
@@ -48,6 +48,7 @@
     "@feathq/feat-eval": "^0.1.0"
   },
   "peerDependencies": {
+    "@openfeature/core": "^1.0.0",
     "@openfeature/server-sdk": "^1.0.0"
   },
   "devDependencies": {
