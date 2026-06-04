@@ -18,17 +18,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
       - run: corepack enable
-      # Local dev portals @feathq/datafile-schema + @feathq/feat-eval to the
-      # sibling packages/ workspace via the `resolutions` field. In CI those
-      # paths don't exist, and we want yarn to fetch the real published
-      # versions from npm. Strip resolutions before install.
-      - name: Strip local-dev portal resolutions
-        run: |
-          node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('./package.json','utf8')); delete p.resolutions; fs.writeFileSync('./package.json', JSON.stringify(p, null, 2));"
       - run: yarn install
       - run: yarn build
-      - run: yarn pack --out /tmp/pkg.tgz
-      - run: npm publish /tmp/pkg.tgz --provenance --access public
+      # Pack + publish via npm so the OIDC trusted-publisher exchange runs
+      # through npm CLI's native flow. yarn pack would produce an
+      # equivalent tarball but routing the publish through npm avoids any
+      # yarn-side auth interception.
+      - run: npm publish --provenance --access public
