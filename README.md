@@ -29,7 +29,7 @@ import { FeatClient } from "@feathq/js-sdk";
 
 const client = new FeatClient({
   apiKey: process.env.FEAT_SERVER_KEY!,    // feat_sdk_…
-  dataPlaneUrl: "https://data.feat.so",
+  url: "https://data-01.feat.so",          // optional; this is the default
 });
 
 await client.ready();
@@ -52,7 +52,7 @@ Use a **server** API key (`feat_sdk_…`). Mobile and client-side keys are for t
 import { OpenFeature } from "@openfeature/server-sdk";
 import { FeatClient, FeatProvider } from "@feathq/js-sdk";
 
-const featClient = new FeatClient({ apiKey, dataPlaneUrl });
+const featClient = new FeatClient({ apiKey });
 await OpenFeature.setProviderAndWait(new FeatProvider(featClient));
 
 const client = OpenFeature.getClient();
@@ -66,7 +66,7 @@ const enabled = await client.getBooleanValue("checkout-v2", false, {
 - The SDK fetches a per-environment **datafile** and keeps it in memory.
 - Polls every 30 s by default (configurable down to 5 s). ETag-aware: unchanged polls are 304s.
 - Evaluation is local; no per-flag network call.
-- `dataPlaneUrl` must use `https://` (the constructor rejects plaintext URLs except `http://localhost` for tests).
+- `url` must use `https://` if you override it (the constructor rejects plaintext URLs except `http://localhost` for tests).
 
 ## License
 

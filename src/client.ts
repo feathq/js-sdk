@@ -6,11 +6,14 @@ import { SDK_VERSION } from "./version";
 const MIN_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_POLL_INTERVAL_MS = 30_000;
 const MAX_DATAFILE_BYTES = 10 * 1024 * 1024;
+const DEFAULT_URL = "https://data-01.feat.so";
 const USER_AGENT = `feat-sdk-js/${SDK_VERSION}`;
 
 export interface FeatClientConfig {
   apiKey: string;
-  dataPlaneUrl: string;
+  // Optional. Defaults to the production endpoint. Override if you have
+  // been pointed at a different region or a staging endpoint.
+  url?: string;
   // Background-poll interval in ms. Defaults to 30s. Floored at 5s to
   // protect both the SDK consumer and the feat endpoint from accidental
   // hot loops.
@@ -29,9 +32,11 @@ export class FeatClient {
   private readyPromise: Promise<void> | null = null;
   private readonly fetchImpl: typeof fetch;
   private readonly pollIntervalMs: number;
+  private readonly url: string;
 
   constructor(private readonly config: FeatClientConfig) {
-    assertHttpsUrl(config.dataPlaneUrl);
+    this.url = config.url ?? DEFAULT_URL;
+    assertHttpsUrl(this.url);
     this.fetchImpl = config.fetch ?? globalThis.fetch.bind(globalThis);
     this.pollIntervalMs = Math.max(
       config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
@@ -93,7 +98,7 @@ export class FeatClient {
   }
 
   private async fetchDatafile(): Promise<boolean> {
-    const url = `${this.config.dataPlaneUrl.replace(/\/$/, "")}/sdk/v1/datafile`;
+    const url = `${this.url.replace(/\/$/, "")}/sdk/v1/datafile`;
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.config.apiKey}`,
       "User-Agent": USER_AGENT,
@@ -129,5 +134,5 @@ function assertHttpsUrl(url: string): void {
   } catch {
     // fall through
   }
-  throw new Error("dataPlaneUrl must use https:// (http://localhost allowed for tests)");
+  throw new Error("url must use https:// (http://localhost allowed for tests)");
 }
