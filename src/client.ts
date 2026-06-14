@@ -1,5 +1,10 @@
 import type { Datafile } from "@feathq/datafile-schema";
 import { evaluate } from "@feathq/feat-eval";
+import {
+  DEFAULT_EVENTS_FLUSH_INTERVAL_MS,
+  EventSummarizer,
+  MIN_EVENTS_FLUSH_INTERVAL_MS,
+} from "./events";
 import type { EvalContext, EvaluationResult } from "./types";
 import { SDK_VERSION } from "./version";
 
@@ -20,6 +25,13 @@ export interface FeatClientConfig {
   pollIntervalMs?: number;
   // Network fetch override. Defaults to globalThis.fetch.
   fetch?: typeof fetch;
+  // Usage event reporting. The SDK summarizes the contexts it evaluates and
+  // flushes them to the platform so they count toward your usage. Defaults to
+  // on; set to false to disable entirely (e.g. self-hosted or test runs).
+  events?: boolean;
+  // How often, in ms, to flush summarized contexts. Defaults to 60s, floored
+  // at 5s. Ignored when events is false.
+  eventsFlushIntervalMs?: number;
 }
 
 // Network client that holds the in-memory datafile and refreshes it on a
@@ -33,6 +45,7 @@ export class FeatClient {
   private readonly fetchImpl: typeof fetch;
   private readonly pollIntervalMs: number;
   private readonly url: string;
+  private readonly summarizer: EventSummarizer | null;
 
   constructor(private readonly config: FeatClientConfig) {
     this.url = config.url ?? DEFAULT_URL;
@@ -42,6 +55,19 @@ export class FeatClient {
       config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
       MIN_POLL_INTERVAL_MS,
     );
+    this.summarizer =
+      config.events === false
+        ? null
+        : new EventSummarizer({
+            url: this.url,
+            apiKey: config.apiKey,
+            fetchImpl: this.fetchImpl,
+            userAgent: USER_AGENT,
+            flushIntervalMs: Math.max(
+              config.eventsFlushIntervalMs ?? DEFAULT_EVENTS_FLUSH_INTERVAL_MS,
+              MIN_EVENTS_FLUSH_INTERVAL_MS,
+            ),
+          });
   }
 
   async ready(): Promise<void> {
@@ -69,6 +95,9 @@ export class FeatClient {
         errorMessage: "client not ready: call client.ready() before evaluate",
       };
     }
+    // Summarize the evaluated context for usage metering. Synchronous and
+    // swallows nothing into the eval path; never blocks or throws here.
+    this.summarizer?.record(context);
     const result = await evaluate(flagKey, defaultValue, context, this.datafile);
     return result as EvaluationResult<T>;
   }
@@ -78,6 +107,7 @@ export class FeatClient {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.summarizer?.close();
   }
 
   private async bootstrap(): Promise<void> {
@@ -95,6 +125,7 @@ export class FeatClient {
     // unref.
     const t = this.timer as unknown as { unref?: () => void };
     t.unref?.();
+    this.summarizer?.start();
   }
 
   private async fetchDatafile(): Promise<boolean> {
