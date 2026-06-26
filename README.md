@@ -64,8 +64,11 @@ const enabled = await client.getBooleanValue("checkout-v2", false, {
 ## How it works
 
 - The SDK fetches a per-environment **datafile** and keeps it in memory.
-- Polls every 30 s by default (configurable down to 5 s). ETag-aware: unchanged polls are 304s.
+- **Live streaming is on by default.** After the initial fetch the SDK opens a Server-Sent Events stream and applies each pushed datafile the moment it changes. Updates are applied in version order: a push is adopted only when its `version` is strictly newer than the one in memory.
+- A background poll keeps running as a safety net (slow while the stream is healthy). If the stream cannot establish or drops, the SDK falls back to polling at the normal interval and keeps retrying the stream with backoff.
+- Set `streaming: false` to rely on polling alone. Poll cadence is `pollIntervalMs` (default 30 s, floored at 5 s). ETag-aware: unchanged polls are 304s.
 - Evaluation is local; no per-flag network call.
+- Call `client.close()` to tear down the stream and poll loop.
 - `url` must use `https://` if you override it (the constructor rejects plaintext URLs except `http://localhost` for tests).
 
 ## License
