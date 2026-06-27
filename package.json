@@ -1,6 +1,6 @@
 {
   "name": "@feathq/js-sdk",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "feat feature-flag SDK for JavaScript and TypeScript (server-side, OpenFeature provider)",
   "keywords": [
     "feature-flags",
