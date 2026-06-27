@@ -353,6 +353,11 @@ function parseDatafilePatch(raw: unknown): DatafilePatch | null {
   if (typeof raw !== "object" || raw === null) return null;
   const p = raw as Record<string, unknown>;
   if (typeof p.from !== "number" || typeof p.to !== "number") return null;
+  // Versions must be integers and strictly increasing. A frame with
+  // `to <= from` (or a non-integer version) could otherwise satisfy the
+  // `current.version === from` gate yet roll the version backward, breaking
+  // version ordering and idempotency.
+  if (!Number.isInteger(p.from) || !Number.isInteger(p.to) || p.to <= p.from) return null;
   if (typeof p.etag !== "string" || typeof p.generatedAt !== "string") return null;
 
   const flags = asRecord(p.flags);
