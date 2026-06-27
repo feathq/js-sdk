@@ -8,9 +8,20 @@
 //   id: <datafile version>
 //   data: <full datafile JSON>
 //
+// A `patch` frame carries an incremental delta against a known base version,
+// letting the client apply a small change in place without re-downloading the
+// whole datafile:
+//
+//   event: patch
+//   id: <to version>
+//   data: { "from": <number>, "to": <number>, "etag": <string>,
+//           "generatedAt": <string>, "flags": { ... }, "removedFlags": [ ... ],
+//           "segments": { ... }, "removedSegments": [ ... ] }
+//
 // Lines beginning with `:` are heartbeat comments and are ignored. The
 // transport here decodes the wire format into structured frames; the client
-// owns adoption (version ordering), reconnect, and poll fallback.
+// owns adoption (version ordering), patch application, reconnect, and poll
+// fallback.
 
 // A single decoded SSE frame. `event` defaults to "message" when the wire
 // omits an explicit `event:` field. `data` is the concatenation of every

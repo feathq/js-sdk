@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Datafile, FlagSpec } from "@feathq/datafile-schema";
+import type { Datafile, FlagSpec, SegmentSpec } from "@feathq/datafile-schema";
 import { FeatClient } from "../src/client";
 import {
   fetchSseTransport,
@@ -640,5 +640,454 @@ describe("stream reconnect policy", () => {
     // Sanity: a well-formed newer put still adopts.
     mock.latest().put(makeDatafile(2, true));
     expect((await client.evaluate("checkout", false, CTX)).value).toBe(true);
+  });
+});
+
+// --- patch fixtures ------------------------------------------------------
+
+function namedBoolFlag(id: string, key: string, on: boolean): FlagSpec {
+  return {
+    id,
+    key,
+    valueType: "boolean",
+    salt: "abcdef0123456789",
+    archived: false,
+    isEnabled: true,
+    offVariationId: FALSE_VAR.id,
+    defaultVariationId: on ? TRUE_VAR.id : FALSE_VAR.id,
+    defaultRollout: null,
+    defaultBucketingContextKindKey: null,
+    variations: [TRUE_VAR, FALSE_VAR],
+    targets: [],
+    rules: [],
+  };
+}
+
+// A flag that serves TRUE only when the context matches segment "vips", and
+// FALSE otherwise. Lets a segment add/remove in a patch be observed through
+// evaluate().
+function segmentGatedFlag(): FlagSpec {
+  return {
+    id: "flag-gate",
+    key: "gate",
+    valueType: "boolean",
+    salt: "abcdef0123456789",
+    archived: false,
+    isEnabled: true,
+    offVariationId: FALSE_VAR.id,
+    defaultVariationId: FALSE_VAR.id,
+    defaultRollout: null,
+    defaultBucketingContextKindKey: null,
+    variations: [TRUE_VAR, FALSE_VAR],
+    targets: [],
+    rules: [
+      {
+        id: "rule-1",
+        bucketingContextKindKey: null,
+        variationId: TRUE_VAR.id,
+        rollout: null,
+        groups: [{ conditions: [{ attributePath: "", operator: "segment_match", values: ["vips"] }] }],
+      },
+    ],
+  };
+}
+
+// A boolean flag that serves TRUE only when the context matches the named
+// segment. Lets a specific segment add/remove be observed through evaluate().
+function segmentGatedFlagFor(id: string, key: string, segmentKey: string): FlagSpec {
+  return {
+    id,
+    key,
+    valueType: "boolean",
+    salt: "abcdef0123456789",
+    archived: false,
+    isEnabled: true,
+    offVariationId: FALSE_VAR.id,
+    defaultVariationId: FALSE_VAR.id,
+    defaultRollout: null,
+    defaultBucketingContextKindKey: null,
+    variations: [TRUE_VAR, FALSE_VAR],
+    targets: [],
+    rules: [
+      {
+        id: `rule-${key}`,
+        bucketingContextKindKey: null,
+        variationId: TRUE_VAR.id,
+        rollout: null,
+        groups: [
+          { conditions: [{ attributePath: "", operator: "segment_match", values: [segmentKey] }] },
+        ],
+      },
+    ],
+  };
+}
+
+// A segment matching user "u1", under the given key.
+function segmentFor(key: string): SegmentSpec {
+  return {
+    key,
+    rules: [{ conditions: [{ attributePath: "user.key", operator: "is_one_of", values: ["u1"] }] }],
+  };
+}
+
+// Matches user "u1".
+const VIPS_SEGMENT: SegmentSpec = segmentFor("vips");
+
+// Reach into the client's in-memory datafile to assert immutability and
+// metadata the public surface does not otherwise expose.
+function peekDatafile(client: FeatClient): Datafile | null {
+  return (client as unknown as { datafile: Datafile | null }).datafile;
+}
+
+interface PatchPayload {
+  from: number;
+  to: number;
+  etag?: string;
+  generatedAt?: string;
+  flags?: Record<string, FlagSpec>;
+  removedFlags?: string[];
+  segments?: Record<string, SegmentSpec>;
+  removedSegments?: string[];
+}
+
+// Build a `patch` SSE frame with sensible defaults so a test only spells out
+// the fields it cares about.
+function patchFrame(p: PatchPayload): SseFrame {
+  const data = JSON.stringify({
+    etag: `etag-${p.to}`,
+    generatedAt: "2026-05-17T00:00:01Z",
+    flags: {},
+    removedFlags: [],
+    segments: {},
+    removedSegments: [],
+    ...p,
+  });
+  return { event: "patch", id: String(p.to), data };
+}
+
+async function readyClient(
+  versions: Datafile[],
+): Promise<{ client: FeatClient; mock: ReturnType<typeof makeMockTransport>; calls: Array<{ url: string; headers: Record<string, string> }> }> {
+  const mock = makeMockTransport();
+  const { fetch, calls } = makeFetch(versions);
+  const client = track(
+    new FeatClient({
+      apiKey: "feat_sdk_key",
+      url: "http://localhost:8787",
+      fetch,
+      streamTransport: mock.transport,
+    }),
+  );
+  await client.ready();
+  mock.latest().open();
+  return { client, mock, calls };
+}
+
+describe("datafile patch frames", () => {
+  it("applies a version-matched patch: a changed flag flips a subsequent evaluate()", async () => {
+    const { client, mock } = await readyClient([makeDatafile(1, false)]);
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(false);
+
+    mock.latest().frame(
+      patchFrame({ from: 1, to: 2, flags: { checkout: namedBoolFlag("flag-1", "checkout", true) } }),
+    );
+
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(true);
+  });
+
+  it("removes a flag named in removedFlags so it no longer evaluates", async () => {
+    const base = makeDatafile(1, false);
+    base.flags.beta = namedBoolFlag("flag-beta", "beta", true);
+    const { client, mock } = await readyClient([base]);
+    expect((await client.evaluate("beta", false, CTX)).value).toBe(true);
+
+    mock.latest().frame(patchFrame({ from: 1, to: 2, removedFlags: ["beta"] }));
+
+    const after = await client.evaluate("beta", false, CTX);
+    expect(after.value).toBe(false);
+    expect(after.reason).toBe("ERROR");
+    // The untouched flag is still present.
+    expect((await client.evaluate("checkout", true, CTX)).value).toBe(false);
+  });
+
+  it("applies a segment add then remove, observed through a segment-gated flag", async () => {
+    const base = makeDatafile(1, false);
+    base.flags.gate = segmentGatedFlag();
+    const { client, mock } = await readyClient([base]);
+    // No "vips" segment yet, so the gating rule does not match.
+    expect((await client.evaluate("gate", false, CTX)).value).toBe(false);
+
+    // Add the segment: now the rule matches and the flag serves TRUE.
+    mock.latest().frame(patchFrame({ from: 1, to: 2, segments: { vips: VIPS_SEGMENT } }));
+    expect((await client.evaluate("gate", false, CTX)).value).toBe(true);
+
+    // Remove the segment again: back to the default.
+    mock.latest().frame(patchFrame({ from: 2, to: 3, removedSegments: ["vips"] }));
+    expect((await client.evaluate("gate", false, CTX)).value).toBe(false);
+  });
+
+  it("advances the version so chained patches apply in sequence", async () => {
+    const { client, mock } = await readyClient([makeDatafile(1, false)]);
+
+    // v1 -> v2: checkout on.
+    mock.latest().frame(
+      patchFrame({ from: 1, to: 2, flags: { checkout: namedBoolFlag("flag-1", "checkout", true) } }),
+    );
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(true);
+
+    // v2 -> v3: checkout off. Only applies because the version advanced to 2.
+    mock.latest().frame(
+      patchFrame({ from: 2, to: 3, flags: { checkout: namedBoolFlag("flag-1", "checkout", false) } }),
+    );
+    expect((await client.evaluate("checkout", true, CTX)).value).toBe(false);
+
+    // A stale patch keyed off the old base version is now ignored.
+    mock.latest().frame(
+      patchFrame({ from: 2, to: 99, flags: { checkout: namedBoolFlag("flag-1", "checkout", true) } }),
+    );
+    expect((await client.evaluate("checkout", true, CTX)).value).toBe(false);
+  });
+
+  it("refreshes the conditional-poll ETag so the next poll sends the patched etag", async () => {
+    const { client, mock, calls } = await readyClient([makeDatafile(1, false)]);
+    // Bootstrap fetch carried the v1 etag.
+    expect(calls[0]!.headers["If-None-Match"]).toBeUndefined();
+
+    mock.latest().frame(
+      patchFrame({ from: 1, to: 2, etag: "etag-patched", flags: { checkout: namedBoolFlag("flag-1", "checkout", true) } }),
+    );
+
+    // A subsequent conditional fetch must carry the etag the patch advanced to.
+    await client.refresh();
+    expect(calls[calls.length - 1]!.headers["If-None-Match"]).toBe("etag-patched");
+  });
+
+  it("ignores a patch whose from does not match the current version", async () => {
+    const { client, mock } = await readyClient([makeDatafile(1, false)]);
+
+    // Gap: base version 5 does not line up with the current version 1.
+    mock.latest().frame(
+      patchFrame({ from: 5, to: 6, flags: { checkout: namedBoolFlag("flag-1", "checkout", true) } }),
+    );
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(false);
+
+    // A correctly-based patch still applies afterwards.
+    mock.latest().frame(
+      patchFrame({ from: 1, to: 2, flags: { checkout: namedBoolFlag("flag-1", "checkout", true) } }),
+    );
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(true);
+  });
+
+  it("ignores malformed patch frames and leaves the datafile intact", async () => {
+    const { client, mock } = await readyClient([makeDatafile(1, false)]);
+
+    // Invalid JSON.
+    mock.latest().frame({ event: "patch", id: "2", data: "{not valid json" });
+    // Missing the from/to gating versions.
+    mock.latest().frame({
+      event: "patch",
+      id: "2",
+      data: JSON.stringify({ etag: "etag-2", generatedAt: "now", flags: {} }),
+    });
+    // from is not a number.
+    mock.latest().frame({
+      event: "patch",
+      id: "2",
+      data: JSON.stringify({ from: "1", to: 2, etag: "etag-2", generatedAt: "now" }),
+    });
+    // removedFlags is not an array.
+    mock.latest().frame({
+      event: "patch",
+      id: "2",
+      data: JSON.stringify({ from: 1, to: 2, etag: "etag-2", generatedAt: "now", removedFlags: "checkout" }),
+    });
+    // Missing etag metadata.
+    mock.latest().frame({
+      event: "patch",
+      id: "2",
+      data: JSON.stringify({ from: 1, to: 2, generatedAt: "now", flags: {} }),
+    });
+
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(false);
+
+    // Sanity: a well-formed patch on the same base still applies.
+    mock.latest().frame(
+      patchFrame({ from: 1, to: 2, flags: { checkout: namedBoolFlag("flag-1", "checkout", true) } }),
+    );
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(true);
+  });
+
+  it("rejects a patch with to <= from or non-integer versions and does not roll the version backward", async () => {
+    const { client, mock } = await readyClient([makeDatafile(5, false)]);
+    expect(peekDatafile(client)!.version).toBe(5);
+
+    const win = () => ({ checkout: namedBoolFlag("flag-1", "checkout", true) });
+    // to === from.
+    mock.latest().frame(patchFrame({ from: 5, to: 5, flags: win() }));
+    // to < from.
+    mock.latest().frame(patchFrame({ from: 5, to: 4, flags: win() }));
+    // Non-integer to.
+    mock.latest().frame(patchFrame({ from: 5, to: 5.5, flags: win() }));
+    // Non-integer from.
+    mock.latest().frame(patchFrame({ from: 5.5, to: 6, flags: win() }));
+
+    // None applied: the flag and the version are untouched.
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(false);
+    expect(peekDatafile(client)!.version).toBe(5);
+
+    // Sanity: a strictly-increasing integer patch on the same base applies.
+    mock.latest().frame(patchFrame({ from: 5, to: 6, flags: win() }));
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(true);
+    expect(peekDatafile(client)!.version).toBe(6);
+  });
+
+  it("ignores a patch that arrives before any datafile is bootstrapped", async () => {
+    const mock = makeMockTransport();
+    // The datafile endpoint 404s, so bootstrap leaves the datafile null.
+    const fetch404 = (async () => new Response("", { status: 404 })) as unknown as typeof fetch;
+    const client = track(
+      new FeatClient({
+        apiKey: "feat_sdk_key",
+        url: "http://localhost:8787",
+        fetch: fetch404,
+        streamTransport: mock.transport,
+      }),
+    );
+    await client.ready();
+    mock.latest().open();
+    expect(peekDatafile(client)).toBeNull();
+
+    // A patch with no datafile to apply against must be dropped, not throw.
+    expect(() =>
+      mock.latest().frame(
+        patchFrame({ from: 1, to: 2, flags: { checkout: namedBoolFlag("flag-1", "checkout", true) } }),
+      ),
+    ).not.toThrow();
+    expect(peekDatafile(client)).toBeNull();
+  });
+
+  it("is idempotent: re-applying a consumed patch leaves version and flags unchanged", async () => {
+    const { client, mock } = await readyClient([makeDatafile(1, false)]);
+
+    mock.latest().frame(
+      patchFrame({ from: 1, to: 2, flags: { checkout: namedBoolFlag("flag-1", "checkout", true) } }),
+    );
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(true);
+    expect(peekDatafile(client)!.version).toBe(2);
+
+    // Re-send the same from:1 patch (now stale: current version is 2). Even
+    // though it carries a different flag value, it must be a no-op.
+    mock.latest().frame(
+      patchFrame({ from: 1, to: 2, flags: { checkout: namedBoolFlag("flag-1", "checkout", false) } }),
+    );
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(true);
+    expect(peekDatafile(client)!.version).toBe(2);
+  });
+
+  it("updates generatedAt on the cached datafile after a patch", async () => {
+    const { client, mock } = await readyClient([makeDatafile(1, false)]);
+    expect(peekDatafile(client)!.generatedAt).toBe("2026-05-17T00:00:00Z");
+
+    mock.latest().frame(
+      patchFrame({
+        from: 1,
+        to: 2,
+        generatedAt: "2026-06-01T12:00:00Z",
+        flags: { checkout: namedBoolFlag("flag-1", "checkout", true) },
+      }),
+    );
+
+    expect(peekDatafile(client)!.generatedAt).toBe("2026-06-01T12:00:00Z");
+  });
+
+  it("applies flags-add, removedFlags, segments-add and removedSegments in a single patch", async () => {
+    const base = makeDatafile(1, false);
+    // A flag to be removed.
+    base.flags.legacy = namedBoolFlag("flag-legacy", "legacy", true);
+    // Gated on a segment the patch adds: currently off.
+    base.flags.gate = segmentGatedFlagFor("flag-gate", "gate", "vips");
+    // Gated on a segment that already exists and the patch removes: currently on.
+    base.flags.gate2 = segmentGatedFlagFor("flag-gate2", "gate2", "olds");
+    base.segments.olds = segmentFor("olds");
+
+    const { client, mock } = await readyClient([base]);
+    expect((await client.evaluate("legacy", false, CTX)).value).toBe(true);
+    expect((await client.evaluate("gate", false, CTX)).value).toBe(false);
+    expect((await client.evaluate("gate2", false, CTX)).value).toBe(true);
+
+    mock.latest().frame(
+      patchFrame({
+        from: 1,
+        to: 2,
+        flags: { beta: namedBoolFlag("flag-beta", "beta", true) },
+        removedFlags: ["legacy"],
+        segments: { vips: VIPS_SEGMENT },
+        removedSegments: ["olds"],
+      }),
+    );
+
+    // flags-add: beta now resolves on.
+    expect((await client.evaluate("beta", false, CTX)).value).toBe(true);
+    // removedFlags: legacy is gone.
+    expect((await client.evaluate("legacy", false, CTX)).reason).toBe("ERROR");
+    // segments-add: the vips gate now matches.
+    expect((await client.evaluate("gate", false, CTX)).value).toBe(true);
+    // removedSegments: the olds gate no longer matches.
+    expect((await client.evaluate("gate2", false, CTX)).value).toBe(false);
+    expect(peekDatafile(client)!.version).toBe(2);
+  });
+
+  it("drops a gap patch, then a safety-net poll resync restores correctness", async () => {
+    vi.useFakeTimers();
+    const mock = makeMockTransport();
+    // Bootstrap serves v1; the resync poll serves v7.
+    const { fetch, calls } = makeFetch([makeDatafile(1, false), makeDatafile(7, true)]);
+    const client = track(
+      new FeatClient({
+        apiKey: "feat_sdk_key",
+        url: "http://localhost:8787",
+        fetch,
+        streamTransport: mock.transport,
+      }),
+    );
+    await client.ready();
+    mock.latest().open();
+
+    // Gap: from:5 is ahead of the current version 1, so the patch is dropped.
+    mock.latest().frame(
+      patchFrame({ from: 5, to: 6, flags: { checkout: namedBoolFlag("flag-1", "checkout", true) } }),
+    );
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(false);
+
+    // Recovery is via the safety-net poll (no proactive reconnect): while the
+    // stream is healthy it runs at the slow safety cadence and resyncs to v7.
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1_000);
+
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(true);
+    expect(peekDatafile(client)!.version).toBe(7);
+  });
+
+  it("swaps in a new datafile instead of mutating the one captured before the patch", async () => {
+    const { client, mock } = await readyClient([makeDatafile(1, false)]);
+    const before = peekDatafile(client)!;
+
+    mock.latest().frame(
+      patchFrame({
+        from: 1,
+        to: 2,
+        flags: { checkout: namedBoolFlag("flag-1", "checkout", true) },
+      }),
+    );
+
+    const after = peekDatafile(client)!;
+    // A fresh object was swapped in.
+    expect(after).not.toBe(before);
+    // The captured reference is untouched: same version, same flag value.
+    expect(before.version).toBe(1);
+    expect(before.flags.checkout!.defaultVariationId).toBe(FALSE_VAR.id);
+    // The live datafile reflects the patch.
+    expect(after.version).toBe(2);
+    expect(after.flags.checkout!.defaultVariationId).toBe(TRUE_VAR.id);
   });
 });

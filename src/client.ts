@@ -1,4 +1,4 @@
-import type { Datafile } from "@feathq/datafile-schema";
+import type { Datafile, FlagSpec, SegmentSpec } from "@feathq/datafile-schema";
 import { evaluate } from "@feathq/feat-eval";
 import { fetchSseTransport, SseHttpError, type SseFrame, type SseTransport } from "./streaming";
 import type { EvalContext, EvaluationResult } from "./types";
@@ -220,7 +220,17 @@ export class FeatClient {
     // carries the datafile version, but the server reseeds the current
     // datafile in full on every connect and ignores any Last-Event-ID we
     // would send, so relying on that reseed (not resumption) is intentional.
-    if (frame.event !== "put") return;
+    if (frame.event === "put") {
+      this.handlePutFrame(frame);
+      return;
+    }
+    if (frame.event === "patch") {
+      this.handlePatchFrame(frame);
+      return;
+    }
+  }
+
+  private handlePutFrame(frame: SseFrame): void {
     let next: Datafile;
     try {
       next = JSON.parse(frame.data) as Datafile;
@@ -229,6 +239,54 @@ export class FeatClient {
       return;
     }
     this.adoptDatafile(next);
+  }
+
+  // Apply an incremental `patch` frame in place. The patch is gated on the
+  // base `from` version: it only applies when it lines up exactly with the
+  // datafile we currently hold. On any gap (or before we have bootstrapped a
+  // datafile at all) the patch is dropped; the reconnect reseed (a full `put`)
+  // and the safety-net poll keep the client correct.
+  private handlePatchFrame(frame: SseFrame): void {
+    let patch: DatafilePatch | null;
+    try {
+      patch = parseDatafilePatch(JSON.parse(frame.data));
+    } catch {
+      warn("ignoring stream frame with invalid patch JSON");
+      return;
+    }
+    if (!patch) {
+      warn("ignoring malformed datafile patch");
+      return;
+    }
+    this.applyPatch(patch);
+  }
+
+  // Merge a version-matched delta atomically: build the next datafile in full,
+  // then swap it in so a partially-applied patch is never observable. Returns
+  // true if applied. Updates the ETag the conditional poll sends so the
+  // safety-net poll 304s instead of re-downloading the whole datafile.
+  private applyPatch(patch: DatafilePatch): boolean {
+    const current = this.datafile;
+    if (!current || current.version !== patch.from) return false;
+
+    const flags: Record<string, FlagSpec> = { ...current.flags };
+    for (const [key, flag] of Object.entries(patch.flags)) flags[key] = flag;
+    for (const key of patch.removedFlags) delete flags[key];
+
+    const segments: Record<string, SegmentSpec> = { ...current.segments };
+    for (const [key, segment] of Object.entries(patch.segments)) segments[key] = segment;
+    for (const key of patch.removedSegments) delete segments[key];
+
+    this.datafile = {
+      ...current,
+      flags,
+      segments,
+      version: patch.to,
+      etag: patch.etag,
+      generatedAt: patch.generatedAt,
+    };
+    this.etag = patch.etag;
+    return true;
   }
 
   // Adopt a datafile only if its version is strictly newer than what we
@@ -269,6 +327,72 @@ export class FeatClient {
     }
     return adopted;
   }
+}
+
+// A validated incremental datafile delta, decoded from a `patch` SSE frame.
+// `from`/`to` gate application against the version we currently hold; the
+// flag/segment maps and removal lists describe the change.
+interface DatafilePatch {
+  from: number;
+  to: number;
+  etag: string;
+  generatedAt: string;
+  flags: Record<string, FlagSpec>;
+  removedFlags: string[];
+  segments: Record<string, SegmentSpec>;
+  removedSegments: string[];
+}
+
+// Validate a parsed `patch` payload into a DatafilePatch, or return null if it
+// is malformed. We require the gating versions (`from`/`to`) and the new
+// metadata (`etag`/`generatedAt`); the four collection fields default to empty
+// when absent so a patch that only adds, or only removes, is still valid. A
+// malformed patch is dropped rather than applied so a bad frame can never
+// corrupt the in-memory datafile.
+function parseDatafilePatch(raw: unknown): DatafilePatch | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const p = raw as Record<string, unknown>;
+  if (typeof p.from !== "number" || typeof p.to !== "number") return null;
+  // Versions must be integers and strictly increasing. A frame with
+  // `to <= from` (or a non-integer version) could otherwise satisfy the
+  // `current.version === from` gate yet roll the version backward, breaking
+  // version ordering and idempotency.
+  if (!Number.isInteger(p.from) || !Number.isInteger(p.to) || p.to <= p.from) return null;
+  if (typeof p.etag !== "string" || typeof p.generatedAt !== "string") return null;
+
+  const flags = asRecord(p.flags);
+  const segments = asRecord(p.segments);
+  const removedFlags = asStringArray(p.removedFlags);
+  const removedSegments = asStringArray(p.removedSegments);
+  if (flags === null || segments === null) return null;
+  if (removedFlags === null || removedSegments === null) return null;
+
+  return {
+    from: p.from,
+    to: p.to,
+    etag: p.etag,
+    generatedAt: p.generatedAt,
+    flags: flags as Record<string, FlagSpec>,
+    removedFlags,
+    segments: segments as Record<string, SegmentSpec>,
+    removedSegments,
+  };
+}
+
+// An absent value defaults to {}; a non-object (or array) value is malformed.
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value === undefined) return {};
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+// An absent value defaults to []; a non-array, or an array with a non-string
+// element, is malformed.
+function asStringArray(value: unknown): string[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
+  if (value.some((item) => typeof item !== "string")) return null;
+  return value as string[];
 }
 
 function warn(message: string, err?: unknown): void {
