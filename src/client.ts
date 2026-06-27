@@ -1,6 +1,6 @@
 import type { Datafile } from "@feathq/datafile-schema";
 import { evaluate } from "@feathq/feat-eval";
-import { fetchSseTransport, type SseFrame, type SseTransport } from "./streaming";
+import { fetchSseTransport, SseHttpError, type SseFrame, type SseTransport } from "./streaming";
 import type { EvalContext, EvaluationResult } from "./types";
 import { SDK_VERSION } from "./version";
 
@@ -14,6 +14,11 @@ const DEFAULT_POLL_INTERVAL_MS = 30_000;
 const DEFAULT_SAFETY_NET_POLL_INTERVAL_MS = 15 * 60 * 1_000;
 const STREAM_BACKOFF_INITIAL_MS = 1_000;
 const STREAM_BACKOFF_MAX_MS = 30_000;
+// A connection must stay open at least this long before we treat it as
+// "healthy" and reset the backoff. Without this, a server that accepts then
+// immediately closes the stream would reset the backoff on every cycle and
+// produce a fixed ~1s reconnect hot loop.
+const STREAM_HEALTHY_RESET_MS = 5_000;
 const MAX_DATAFILE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_URL = "https://data-01.feat.so";
 const USER_AGENT = `feat-sdk-js/${SDK_VERSION}`;
@@ -159,6 +164,7 @@ export class FeatClient {
     while (!this.closed) {
       const abort = new AbortController();
       this.streamAbort = abort;
+      let connectedAt: number | null = null;
       try {
         await this.streamTransport({
           url: streamUrl,
@@ -166,21 +172,37 @@ export class FeatClient {
           fetch: this.fetchImpl,
           signal: abort.signal,
           onOpen: () => {
-            backoff = STREAM_BACKOFF_INITIAL_MS;
+            connectedAt = Date.now();
             this.setStreamConnected(true);
           },
           onFrame: (frame) => this.handleFrame(frame),
         });
-        // Clean end: the server closed the stream. Reconnect promptly.
+        // Clean end: the server closed the stream. Only reset the backoff if
+        // the connection was healthy for a while; an accept-then-immediately-
+        // close server must still back off rather than reconnect every ~1s.
         this.setStreamConnected(false);
+        if (connectedAt !== null && Date.now() - connectedAt >= STREAM_HEALTHY_RESET_MS) {
+          backoff = STREAM_BACKOFF_INITIAL_MS;
+        } else {
+          backoff = Math.min(backoff * 2, STREAM_BACKOFF_MAX_MS);
+        }
       } catch (err) {
         this.setStreamConnected(false);
         if (this.closed || isAbortError(err)) break;
+        // A revoked or invalid key is terminal: retrying the stream can never
+        // succeed, so stop the loop and let the poll path carry on (it surfaces
+        // the same failure and keeps the last-known-good datafile in place).
+        if (isTerminalStreamStatus(err)) {
+          warn("datafile stream rejected (auth); falling back to polling:", err);
+          break;
+        }
         warn("datafile stream error:", err);
         backoff = Math.min(backoff * 2, STREAM_BACKOFF_MAX_MS);
       }
       if (this.closed) break;
-      await abortableDelay(backoff, abort.signal);
+      // Jitter the delay so a fleet of SDKs that dropped together does not
+      // reconnect in lockstep.
+      await abortableDelay(jitter(backoff), abort.signal);
     }
     this.setStreamConnected(false);
   }
@@ -194,6 +216,10 @@ export class FeatClient {
   }
 
   private handleFrame(frame: SseFrame): void {
+    // We deliberately do not implement Last-Event-ID resumption. `frame.id`
+    // carries the datafile version, but the server reseeds the current
+    // datafile in full on every connect and ignores any Last-Event-ID we
+    // would send, so relying on that reseed (not resumption) is intentional.
     if (frame.event !== "put") return;
     let next: Datafile;
     try {
@@ -255,6 +281,18 @@ function warn(message: string, err?: unknown): void {
 
 function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
+}
+
+// 401/403 are terminal: the key is missing, invalid, or revoked and no amount
+// of reconnecting will help. Everything else (429, 5xx, network) is retryable.
+function isTerminalStreamStatus(err: unknown): boolean {
+  return err instanceof SseHttpError && (err.status === 401 || err.status === 403);
+}
+
+// Randomised backoff: keep the full delay between 50% and 100% of `ms` so
+// reconnect attempts spread out instead of synchronising across clients.
+function jitter(ms: number): number {
+  return ms * (0.5 + Math.random() * 0.5);
 }
 
 function unref(timer: ReturnType<typeof setTimeout>): void {

@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Datafile, FlagSpec } from "@feathq/datafile-schema";
 import { FeatClient } from "../src/client";
-import { fetchSseTransport, type SseFrame, type SseTransport, type SseTransportOptions } from "../src/streaming";
+import {
+  fetchSseTransport,
+  SseHttpError,
+  SseParser,
+  type SseFrame,
+  type SseTransport,
+  type SseTransportOptions,
+} from "../src/streaming";
 
 // --- datafile fixtures ---------------------------------------------------
 
@@ -382,5 +389,256 @@ describe("fetchSseTransport (default reader)", () => {
         onFrame: () => {},
       }),
     ).rejects.toThrow(/401/);
+  });
+
+  it("surfaces the HTTP status as a typed SseHttpError", async () => {
+    const fetchImpl = (async () => new Response("forbidden", { status: 403 })) as unknown as typeof fetch;
+    await expect(
+      fetchSseTransport({
+        url: "http://localhost/sdk/v1/datafile/stream",
+        headers: {},
+        fetch: fetchImpl,
+        signal: new AbortController().signal,
+        onFrame: () => {},
+      }),
+    ).rejects.toMatchObject({ name: "SseHttpError", status: 403 });
+  });
+
+  it("parses a frame split exactly between CR and LF across two chunks as one frame", async () => {
+    const frames: SseFrame[] = [];
+    // The first data line is terminated by CRLF, but the chunk boundary falls
+    // between the CR and the LF. A naive parser would dispatch the line early
+    // and split this single two-line frame into two.
+    const fetchImpl = (async () =>
+      streamResponse([
+        'event: put\ndata: {"version":9,\r',
+        '\ndata: "x":1}\r\n\r\n',
+      ])) as unknown as typeof fetch;
+
+    await fetchSseTransport({
+      url: "http://localhost/sdk/v1/datafile/stream",
+      headers: {},
+      fetch: fetchImpl,
+      signal: new AbortController().signal,
+      onFrame: (f) => frames.push(f),
+    });
+
+    expect(frames).toEqual([{ event: "put", id: null, data: '{"version":9,\n"x":1}' }]);
+  });
+
+  it("drops a final frame at EOF that has no terminating blank line", async () => {
+    const frames: SseFrame[] = [];
+    // Data line is terminated, but the stream ends before the blank line that
+    // would dispatch the frame. Per spec, the incomplete frame is discarded.
+    const fetchImpl = (async () =>
+      streamResponse(['event: put\ndata: {"version":9}\n'])) as unknown as typeof fetch;
+
+    await fetchSseTransport({
+      url: "http://localhost/sdk/v1/datafile/stream",
+      headers: {},
+      fetch: fetchImpl,
+      signal: new AbortController().signal,
+      onFrame: (f) => frames.push(f),
+    });
+
+    expect(frames).toEqual([]);
+  });
+
+  it("aborts the stream when a never-terminated line exceeds the byte cap", async () => {
+    const fetchImpl = (async () =>
+      streamResponse(["x".repeat(10_000)])) as unknown as typeof fetch;
+
+    await expect(
+      fetchSseTransport({
+        url: "http://localhost/sdk/v1/datafile/stream",
+        headers: {},
+        fetch: fetchImpl,
+        signal: new AbortController().signal,
+        maxBytes: 1_000,
+        onFrame: () => {},
+      }),
+    ).rejects.toThrow(/exceeds/);
+  });
+});
+
+describe("SseParser byte cap", () => {
+  it("throws when the line buffer grows past the cap without a newline", () => {
+    const parser = new SseParser(() => {}, 64);
+    expect(() => parser.push("x".repeat(128))).toThrow(/exceeds/);
+  });
+
+  it("throws when accumulated data lines exceed the cap", () => {
+    const parser = new SseParser(() => {}, 200);
+    expect(() => {
+      // Each chunk is well under the line-buffer cap and is fully drained, but
+      // the data bytes accumulate across frames lines past the cap.
+      for (let i = 0; i < 50; i++) parser.push(`data: ${"x".repeat(20)}\n`);
+    }).toThrow(/exceeds/);
+  });
+});
+
+describe("stream reconnect policy", () => {
+  function makeClient(transport: SseTransport): FeatClient {
+    const { fetch } = makeFetch([makeDatafile(1, false)]);
+    return track(
+      new FeatClient({
+        apiKey: "feat_sdk_key",
+        url: "http://localhost:8787",
+        fetch,
+        streamTransport: transport,
+      }),
+    );
+  }
+
+  for (const status of [401, 403]) {
+    it(`does not reconnect after a terminal ${status} (falls back to polling)`, async () => {
+      vi.useFakeTimers();
+      const mock = makeMockTransport();
+      const client = makeClient(mock.transport);
+      await client.ready();
+      expect(mock.connections.length).toBe(1);
+
+      mock.latest().open();
+      mock.latest().fail(new SseHttpError(status));
+
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      // No reconnect: the loop stopped and the poll path carries on.
+      expect(mock.connections.length).toBe(1);
+    });
+  }
+
+  for (const status of [429, 500]) {
+    it(`keeps retrying after a retryable ${status}`, async () => {
+      vi.useFakeTimers();
+      const mock = makeMockTransport();
+      const client = makeClient(mock.transport);
+      await client.ready();
+      expect(mock.connections.length).toBe(1);
+
+      mock.latest().open();
+      mock.latest().fail(new SseHttpError(status));
+
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(mock.connections.length).toBe(2);
+    });
+  }
+
+  it("grows and caps backoff with jitter across repeated failures", async () => {
+    vi.useFakeTimers();
+    // Pin jitter to its lower bound (factor 0.5) so the delays are exact.
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const mock = makeMockTransport();
+    const client = makeClient(mock.transport);
+    await client.ready();
+
+    // backoff doubles 1s->2s->4s->8s->16s->30s(cap); jitter halves each.
+    const expectedDelays = [1_000, 2_000, 4_000, 8_000, 15_000, 15_000];
+    let conns = 1;
+    for (const delay of expectedDelays) {
+      mock.latest().open();
+      mock.latest().fail(new Error("stream dropped"));
+
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(mock.connections.length).toBe(conns);
+
+      await vi.advanceTimersByTimeAsync(1);
+      conns += 1;
+      expect(mock.connections.length).toBe(conns);
+    }
+  });
+
+  it("backs off (not a fixed 1s loop) on accept-then-immediate-close", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0); // jitter factor 0.5
+    const mock = makeMockTransport();
+    const client = makeClient(mock.transport);
+    await client.ready();
+
+    // Cycle 1: open then close immediately. The connection was never healthy
+    // long enough to reset, so backoff grows to 2s and the delay is 1s.
+    mock.latest().open();
+    mock.latest().endCleanly();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(mock.connections.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mock.connections.length).toBe(2);
+
+    // Cycle 2: same again, backoff grows to 4s, delay is 2s (proof it is not
+    // pinned at ~1s by onOpen resetting the backoff).
+    mock.latest().open();
+    mock.latest().endCleanly();
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(mock.connections.length).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mock.connections.length).toBe(3);
+  });
+
+  it("keeps the jittered delay at or below the full backoff (upper bound)", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(1); // jitter factor 1.0 (max)
+    const mock = makeMockTransport();
+    const client = makeClient(mock.transport);
+    await client.ready();
+
+    mock.latest().open();
+    mock.latest().fail(new Error("stream dropped"));
+
+    // backoff is 2s; at the upper jitter bound the delay is the full 2s.
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(mock.connections.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mock.connections.length).toBe(2);
+  });
+
+  it("resets backoff after a healthy connection, then jitters again", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0); // jitter factor 0.5
+    const mock = makeMockTransport();
+    const client = makeClient(mock.transport);
+    await client.ready();
+
+    // Stay connected long enough to count as healthy, then close cleanly.
+    mock.latest().open();
+    await vi.advanceTimersByTimeAsync(10_000);
+    mock.latest().endCleanly();
+
+    // Healthy reset means backoff returns to 1s; delay is 0.5s.
+    await vi.advanceTimersByTimeAsync(499);
+    expect(mock.connections.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mock.connections.length).toBe(2);
+  });
+
+  it("ignores non-put events and put frames with invalid JSON", async () => {
+    const mock = makeMockTransport();
+    const { fetch } = makeFetch([makeDatafile(1, false)]);
+    const client = track(
+      new FeatClient({
+        apiKey: "feat_sdk_key",
+        url: "http://localhost:8787",
+        fetch,
+        streamTransport: mock.transport,
+      }),
+    );
+    await client.ready();
+    mock.latest().open();
+
+    // A non-put event carrying a newer datafile must not be adopted.
+    mock.latest().frame({
+      event: "message",
+      id: "99",
+      data: JSON.stringify(makeDatafile(99, true)),
+    });
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(false);
+
+    // A put with malformed JSON must not throw and must leave the datafile as is.
+    mock.latest().frame({ event: "put", id: "99", data: "{not valid json" });
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(false);
+
+    // Sanity: a well-formed newer put still adopts.
+    mock.latest().put(makeDatafile(2, true));
+    expect((await client.evaluate("checkout", false, CTX)).value).toBe(true);
   });
 });

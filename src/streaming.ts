@@ -1,6 +1,6 @@
 // Live datafile streaming over Server-Sent Events (SSE).
 //
-// The data plane exposes `GET {url}/sdk/v1/datafile/stream` as a long-lived
+// The server exposes `GET {url}/sdk/v1/datafile/stream` as a long-lived
 // `text/event-stream`. A `put` frame carries the full datafile JSON and is
 // emitted on connect and on every subsequent change:
 //
@@ -21,6 +21,22 @@ export interface SseFrame {
   data: string;
 }
 
+// Hard cap on the bytes a single SSE frame (or an unterminated line) may
+// accumulate before the parser aborts the stream. Mirrors the poll path's
+// datafile size limit so a server that never emits a newline, or a runaway
+// `data:` frame, cannot exhaust memory.
+export const STREAM_MAX_BYTES = 10 * 1024 * 1024;
+
+// Thrown by the transport when the server rejects the stream with a non-ok
+// HTTP status. Carries the status so the client can distinguish terminal
+// auth failures (401/403) from retryable ones (429/5xx).
+export class SseHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`datafile stream failed: ${status}`);
+    this.name = "SseHttpError";
+  }
+}
+
 export interface SseTransportOptions {
   // Fully-qualified stream URL.
   url: string;
@@ -30,6 +46,8 @@ export interface SseTransportOptions {
   fetch: typeof fetch;
   // Aborted by the client to tear the connection down.
   signal: AbortSignal;
+  // Optional override of the per-frame byte cap. Defaults to STREAM_MAX_BYTES.
+  maxBytes?: number;
   // Invoked once the server has accepted the connection (HTTP 200). The
   // client uses this to mark the stream healthy and relax the safety-net
   // poll.
@@ -48,14 +66,14 @@ export type SseTransport = (options: SseTransportOptions) => Promise<void>;
 // third-party dependency, works anywhere the SDK's fetch streams a response
 // body (Node 18+, Bun, Deno, Workers).
 export const fetchSseTransport: SseTransport = async (options) => {
-  const { url, headers, fetch: fetchImpl, signal, onOpen, onFrame } = options;
+  const { url, headers, fetch: fetchImpl, signal, onOpen, onFrame, maxBytes } = options;
   const res = await fetchImpl(url, {
     method: "GET",
     headers: { Accept: "text/event-stream", ...headers },
     signal,
   });
   if (!res.ok) {
-    throw new Error(`datafile stream failed: ${res.status}`);
+    throw new SseHttpError(res.status);
   }
   if (!res.body) {
     throw new Error("datafile stream returned no body");
@@ -64,7 +82,7 @@ export const fetchSseTransport: SseTransport = async (options) => {
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  const parser = new SseParser(onFrame);
+  const parser = new SseParser(onFrame, maxBytes ?? STREAM_MAX_BYTES);
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -87,24 +105,43 @@ export class SseParser {
   private buffer = "";
   private eventType = "";
   private dataLines: string[] = [];
+  private dataBytes = 0;
   private lastId: string | null = null;
 
-  constructor(private readonly onFrame: (frame: SseFrame) => void) {}
+  constructor(
+    private readonly onFrame: (frame: SseFrame) => void,
+    private readonly maxBytes: number = STREAM_MAX_BYTES,
+  ) {}
 
   push(chunk: string): void {
     this.buffer += chunk;
+    // Guard the line buffer: a server that never emits a newline would grow
+    // this without bound. Aborting the stream is preferable to OOM.
+    if (this.buffer.length > this.maxBytes) {
+      throw new Error(`datafile stream line exceeds ${this.maxBytes} bytes`);
+    }
     let newlineIndex: number;
     // Normalise CRLF and CR to LF as we go by splitting on any of them.
     while ((newlineIndex = this.indexOfLineBreak(this.buffer)) !== -1) {
+      // A lone CR at the very end of the buffer may be the first half of a
+      // CRLF split across a chunk boundary. Hold it back until more bytes
+      // arrive (or flush() drops it at end of stream) so we never dispatch a
+      // line early and then mistake the following LF for a blank line.
+      if (this.buffer[newlineIndex] === "\r" && newlineIndex === this.buffer.length - 1) {
+        break;
+      }
       const line = this.buffer.slice(0, newlineIndex);
       this.buffer = this.buffer.slice(newlineIndex + this.lineBreakLength(newlineIndex));
       this.handleLine(line);
     }
   }
 
-  // Dispatch any frame that completed without a trailing blank line (e.g. at
-  // end of stream). A frame with no data is never dispatched.
+  // Leftover bytes are passed to handleLine but dispatch() is never called, so
+  // a frame missing its terminating blank line is discarded. That is
+  // spec-correct: an unterminated final frame is not delivered.
   flush(): void {
+    // Drop a held-back trailing CR: at end of stream no LF can follow it.
+    if (this.buffer.endsWith("\r")) this.buffer = this.buffer.slice(0, -1);
     if (this.buffer.length > 0) {
       this.handleLine(this.buffer);
       this.buffer = "";
@@ -152,6 +189,12 @@ export class SseParser {
         this.eventType = value;
         break;
       case "data":
+        // Guard the accumulated frame: a runaway `data:` frame must not
+        // outgrow the cap the poll path enforces.
+        this.dataBytes += value.length;
+        if (this.dataBytes > this.maxBytes) {
+          throw new Error(`datafile stream frame exceeds ${this.maxBytes} bytes`);
+        }
         this.dataLines.push(value);
         break;
       case "id":
@@ -178,6 +221,7 @@ export class SseParser {
     };
     this.eventType = "";
     this.dataLines = [];
+    this.dataBytes = 0;
     this.onFrame(frame);
   }
 }
